@@ -4,7 +4,8 @@ local THIS_COMPUTER_ID = os.getComputerID()
 
 local currentProtocol = "bpp@default"
 local prefetchCache = {}
-local ban = require "os.ban"
+local ban = require("os.ban")
+if not ban.isWireless() then error("Body Area Network failed to load") end
 
 local function splitString (inputstr, sep)
     if sep == nil then
@@ -76,10 +77,10 @@ function bannet.lookup(protocol, hostname, timeout)
     end
 
     -- Check localhost first
-    if hostnames[protocol] then
+    if bannet.hostnames[protocol] then
         if hostname == nil then
             table.insert(results, os.getComputerID())
-        elseif hostname == "localhost" or hostname == hostnames[protocol] then
+        elseif hostname == "localhost" or hostname == bannet.hostnames[protocol] then
             return os.getComputerID()
         end
     end
@@ -92,7 +93,7 @@ function bannet.lookup(protocol, hostname, timeout)
     end
 
     -- Broadcast a lookup packet
-    ban.transmit(rednet.CHANNEL_BROADCAST, {
+    ban.transmit(rednet.CHANNEL_BROADCAST, THIS_COMPUTER_ID, {
         sType = "lookup",
         sProtocol = protocol,
         sHostname = hostname,
@@ -137,7 +138,8 @@ peripheral.find("modem", function(name, wrapped)
         rednet.open(name)
     end
 end)]]
- 
+bannet.open()
+
 if not bannet.isOpen() then
     error("Body Area Network offline", 2)
 end
@@ -217,7 +219,7 @@ local wrappedPeripheralApi = {
     wppPrefetch=function(clientId, peripheralName, methods)
         log("Real wppPrefetch("..clientId..", ".. peripheralName ..", ".. textutils.serialize(methods) ..")")
         local methodResults = {}
-        
+
         for possibleMethodName,methodInfo in pairs(methods) do
             local methodName
             local methodArgs
@@ -235,7 +237,7 @@ local wrappedPeripheralApi = {
                 local r = {nativePeripheral.call(peripheralName, methodName, unpack(methodArgs))}
                 return r
             end)
-    
+
             if status then
                 methodResults[methodName] = result
             end
@@ -299,11 +301,11 @@ function wireless.prefetchMethods(peripheralUrl, methods)
 
     if parsedPeripheralUrl == nil then
         prefetchCache[peripheralUrl] = {}
-        
+
         for possibleMethodName,methodInfo in pairs(methods) do
             local methodName
             local methodArgs
-            
+
             if type(methodInfo) == "table" then
                 methodName = possibleMethodName
                 methodArgs = methodInfo
