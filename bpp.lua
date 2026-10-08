@@ -2,8 +2,9 @@ local debugMode = false
 local CURRENT_VERSION = "1"
 local THIS_COMPUTER_ID = os.getComputerID()
 
-local currentProtocol = "wpp@default"
+local currentProtocol = "bpp@default"
 local prefetchCache = {}
+local ban = require "os.ban"
 
 local function splitString (inputstr, sep)
     if sep == nil then
@@ -25,15 +26,120 @@ local function log(message)
     end
 end
 
--- Start->Wireless Modem Setup
+-- Ugly patching to wrap BAN with Rednet
+local bannet = {}
+bannet.hostnames = {}
+function bannet.open()
+    ban.open(THIS_COMPUTER_ID)
+    ban.open(rednet.CHANNEL_BROADCAST)
+end
+function bannet.close()
+    ban.close(THIS_COMPUTER_ID)
+    ban.close(rednet.CHANNEL_BROADCAST)
+end
+function bannet.isOpen()
+    return ban.isOpen(THIS_COMPUTER_ID) and ban.isOpen(rednet.CHANNEL_BROADCAST)
+end
+function bannet.send(recipient, message, protocol)
+    local message_id = math.random(1, 2147483647)
+    local reply_channel = THIS_COMPUTER_ID
+    local message_wrapper = {
+        nMessageID = message_id,
+        nRecipient = recipient,
+        nSender = os.getComputerID(),
+        message = message,
+        sProtocol = protocol
+    }
+    ban.transmit(recipient, reply_channel, message_wrapper)
+    ban.transmit(rednet.CHANNEL_REPEAT, reply_channel, message_wrapper)
+end
+function bannet.host(protocol, hostname)
+    if hostname == "localhost" then
+        error("Reserved hostname", 2)
+    end
+    if bannet.hostnames[protocol] ~= hostname then
+        if bannet.lookup(protocol, hostname) ~= nil then
+            error("Hostname in use", 2)
+        end
+        bannet.hostnames[protocol] = hostname
+    end
+end
+function bannet.unhost(protocol)
+    bannet.hostnames[protocol] = nil
+end
+function bannet.lookup(protocol, hostname, timeout)
+
+    -- Build list of host IDs
+    local results = nil
+    if hostname == nil then
+        results = {}
+    end
+
+    -- Check localhost first
+    if hostnames[protocol] then
+        if hostname == nil then
+            table.insert(results, os.getComputerID())
+        elseif hostname == "localhost" or hostname == hostnames[protocol] then
+            return os.getComputerID()
+        end
+    end
+
+    if not bannet.isOpen() then
+        if results then
+            return table.unpack(results)
+        end
+        return nil
+    end
+
+    -- Broadcast a lookup packet
+    ban.transmit(rednet.CHANNEL_BROADCAST, {
+        sType = "lookup",
+        sProtocol = protocol,
+        sHostname = hostname,
+    }, "dns")
+
+    -- Start a timer
+    local timer = os.startTimer(timeout or 2)
+
+    -- Wait for events
+    while true do
+        local event, p1, p2, p3 = os.pullEvent()
+        if event == "rednet_message" then
+            -- Got a rednet message, check if it's the response to our request
+            local sender_id, message, message_protocol = p1, p2, p3
+            if message_protocol == "dns" and type(message) == "table" and message.sType == "lookup response" then
+                if message.sProtocol == protocol then
+                    if hostname == nil then
+                        table.insert(results, sender_id)
+                    elseif message.sHostname == hostname then
+                        os.cancelTimer(timer)
+                        return sender_id
+                    end
+                end
+            end
+        elseif event == "timer" and p1 == timer then
+            -- Got a timer event, check it's the end of our timeout
+            break
+        end
+    end
+
+    os.cancelTimer(timer)
+
+    if results then
+        return table.unpack(results)
+    end
+    return nil
+end
+
+--[[ Start->Wireless Modem Setup
 peripheral.find("modem", function(name, wrapped)
     if wrapped.isWireless() then
         rednet.open(name)
     end
-end)
+end)]]
  
-if not rednet.isOpen() then
-    error("No wireless modem found", 2)
+if not bannet.isOpen() then
+    error("Body Area Network offline", 2)
 end
 -- End->Wireless Modem Setup
 
@@ -50,7 +156,7 @@ end
 
 local function sendMessage(clientId, type, data)
     log("Sending message with type '".. type .."' to ".. currentProtocol .."://".. clientId .." with data: ".. textutils.serialize(data))
-    rednet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
+    bannet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
 local function sendReply(clientId, data)
@@ -153,9 +259,9 @@ function wireless.connect(networkId)
 end
 
 function wireless.host(networkId)
-    rednet.unhost(currentProtocol)
+    bannet.unhost(currentProtocol)
     wireless.connect(networkId)
-    rednet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
+    bannet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
 end
 
 function wireless.localEventHandler(event)
@@ -175,9 +281,9 @@ function wireless.localEventHandler(event)
 end
 
 function wireless.listen(networkId)
-    rednet.unhost(currentProtocol)
+    bannet.unhost(currentProtocol)
     wireless.connect(networkId)
-    rednet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
+    bannet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
 
     print("Listening for WPP events on ".. currentProtocol)
     print("Control+T to quit")
@@ -231,7 +337,7 @@ end
 function remotePeripheral.getNames()
     local allNames = nativePeripheral.getNames()
 
-    local clients = table.pack(rednet.lookup(currentProtocol))
+    local clients = table.pack(bannet.lookup(currentProtocol))
     log("New getNames() found these clients: ".. textutils.serialize(clients))
 
     for n,clientId in ipairs(clients) do
